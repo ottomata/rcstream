@@ -81,36 +81,63 @@ var rcstream = (function() {
     return value.indexOf('*') !== -1 ? 0 : value.length;
   }
 
-  return function(serverPort, redisHost, redisPort) {
+  return function(serverPort, zookeeperConnect, topic) {
+    // default topic is 'rcstream'
+    topic = topic || 'rcstream'
+
     var MAX_SUBSCRIPTIONS = 10;
     var server = require('http').createServer();
     var namespace = require('socket.io')(server).of('/rc');
-    var redisClient = require('redis').createClient(redisPort, redisHost);
+    var kafka = require('kafka-node');
+
+
     var log = debug('rcstream:main');
-    var debugRedis = debug('rcstream:redis');
+    var debugKafka = debug('rcstream:kafka');
     var subscriptionStore = {};
 
     server.listen(serverPort);
-    log('listening on port %d', serverPort);
-    log('connecting to redis at %s:%d', redisHost, redisPort);
+    log('Listening on port %d', serverPort);
+    setTimeout(function() {
+        log('Waiting 2 seconds for websocket clients to reconnect');
+    }, 2000);
+    log('Connecting to zookeeper at %s', zookeeperConnect);
 
-    // Set up Redis
-    redisClient.psubscribe('rc.*');
-    redisClient.on('error', function() {
-      log('redis error %o', arguments);
+    // Set up Kafka Consumer
+    // TODO: Wait for websocket clients to reconnect, as consumption
+    // will happen faster, and clients may miss messages.
+    var kafkaClient = new kafka.Client(zookeeperConnect, 'rcstream')
+    var kafkaConsumer = new kafka.HighLevelConsumer(
+      kafkaClient,
+      [
+          { topic: topic }
+      ],
+      {
+        autoCommit: true,
+        autoCommitIntervalMs: 1000,
+        groupId: 'rcstream',
+      }
+    );
+
+
+    kafkaConsumer.on('error', function() {
+      log('Kafka error %o', arguments);
       process.exit(1);
     });
-    redisClient.on('pmessage', function(pattern, channel, message) {
+
+    // Consume message from kafka and send to ws client
+    kafkaConsumer.on('message', function(message) {
       var change, wiki, id, subscriptions;
       try {
-        change = JSON.parse(message);
+        change = JSON.parse(message.value);
       } catch (e) {
-        log('Failed to decode %o', message);
+        log('Failed to decode: %o', message.value);
         return;
       }
-      debugRedis('pmessage %o', arguments);
+      debugKafka('message %o', arguments);
 
       wiki = change.server_name;
+
+      // Send this message to socket.io clients that want it.
       for (id in namespace.connected) {
         subscriptions = subscriptionStore[id];
         if (subscriptions && matchAny(wiki, subscriptions)) {
@@ -175,21 +202,34 @@ var rcstream = (function() {
         delete subscriptionStore[socket.id];
       });
     });
+
+
+    // TODO: This doesn't seem to work.
+    // I want Zookeeper to know that this consumer
+    // has shut down properly.
+
+    // Handle SIGINT to close Kafka consumers nicely
+    process.on('SIGINT', function() {
+        log('Caught interrupt signal');
+        kafkaConsumer.close(true, function() {
+          kafkaClient.close(function() {
+            process.exit();
+          });
+        });
+
+        process.exit();
+    });
   };
 }());
 
 var arg = yargs.usage('Usage: $0 [options]')
+  .option('zookeeper-connect', {
+    desc: 'Zookeeper connect string used to look up Kafka connection information',
+    default: 'localhost:2181',
+  })
   .option('server-port', {
     desc: 'Port for socket.io server to listen on',
     default: 3000,
-  })
-  .option('redis-host', {
-    desc: 'Host of Redis instance',
-    default: '127.0.0.1',
-  })
-  .option('redis-port', {
-    desc: 'Port of Redis instance',
-    default: 6379,
   })
   .option('debug', {
     desc: 'Enable debug output',
@@ -214,4 +254,4 @@ if (arg.verbose) {
   debug.enable('rcstream:main');
 }
 
-rcstream(arg['server-port'], arg['redis-host'], arg['redis-port']);
+rcstream(arg['server-port'], arg['zookeeper-connect']);

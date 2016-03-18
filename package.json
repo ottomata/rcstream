@@ -8,9 +8,10 @@
   },
   "dependencies": {
     "debug": "2.2.0",
-    "redis": "2.4.2",
     "socket.io": "1.4.5",
-    "yargs": "4.1.0"
+    "yargs": "4.1.0",
+    "kafka-node": "0.3.2",
+    "node-zookeeper-client": "0.2.2"
   },
   "repository": {
     "type": "git",
